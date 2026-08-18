@@ -10,6 +10,16 @@ services:
     depends_on:
       - postgres
       - redis
+  scanner:
+    build: .
+    container_name: meme_scanner
+    command: python -m backend.app.workers.scanner_worker
+    depends_on:
+      - api
+    env_file:
+      - .env
+    volumes:
+      - .:/app
 
   postgres:
     image: postgres:16
