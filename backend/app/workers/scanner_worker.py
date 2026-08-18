@@ -15,19 +15,10 @@ from backend.app.services.token_service import save_pair
 
 SCAN_INTERVAL_SECONDS = 60
 MAX_TOKENS_PER_CYCLE = 20
-
-# On-chain safety analysis requires several Helius requests.
-# Keep this conservative while developing.
 MAX_SAFETY_ANALYSES_PER_CYCLE = 5
 
 
 def choose_best_pair(pairs: list[dict]) -> dict | None:
-    """
-    Choose the most useful pool for market-risk analysis.
-
-    Prefer the pair with the highest reported USD liquidity.
-    """
-
     if not pairs:
         return None
 
@@ -59,7 +50,7 @@ async def run_scan_cycle():
 
     tokens_checked = 0
     new_pairs = 0
-    existing_pairs = 0
+    refreshed_pairs = 0
     safety_analyzed = 0
     low_risk = 0
     errors = 0
@@ -69,61 +60,70 @@ async def run_scan_cycle():
             token_address = token_profile["token_address"]
 
             try:
-                pairs = await fetch_token_pairs(
-                    token_address
+                # Check whether this token already has
+                # a completed safety score.
+                token_before_scan = db.scalar(
+                    select(Token).where(
+                        Token.address == token_address
+                    )
                 )
+
+                needs_safety_analysis = (
+                    token_before_scan is None
+                    or token_before_scan.rug_score is None
+                )
+
+                pairs = await fetch_token_pairs(token_address)
 
                 tokens_checked += 1
 
                 if not pairs:
                     continue
 
-                token_is_new = False
-
                 for pair_data in pairs:
-                    pair_address = pair_data.get(
-                        "pairAddress"
-                    )
+                    pair_address = pair_data.get("pairAddress")
 
                     if not pair_address:
                         continue
 
                     existing_pair = db.scalar(
                         select(Pair).where(
-                            Pair.pair_address
-                            == pair_address
+                            Pair.pair_address == pair_address
                         )
                     )
 
-                    if existing_pair:
-                        existing_pairs += 1
-                        continue
+                    was_existing = existing_pair is not None
 
+                    # IMPORTANT:
+                    # save_pair now creates OR refreshes the pair.
                     save_pair(
                         db,
                         pair_data,
                     )
 
-                    new_pairs += 1
-                    token_is_new = True
+                    if was_existing:
+                        refreshed_pairs += 1
 
-                    base_token = (
-                        pair_data.get("baseToken")
-                        or {}
-                    )
+                    else:
+                        new_pairs += 1
 
-                    print(
-                        "NEW PAIR:",
-                        base_token.get("symbol"),
-                        token_address,
-                        pair_data.get("dexId"),
-                        flush=True,
-                    )
+                        base_token = (
+                            pair_data.get("baseToken")
+                            or {}
+                        )
 
-                # Only spend Helius requests on newly
-                # discovered candidates during this cycle.
+                        print(
+                            "NEW PAIR:",
+                            base_token.get("symbol"),
+                            token_address,
+                            pair_data.get("dexId"),
+                            flush=True,
+                        )
+
+                # Run expensive Helius safety analysis only
+                # if this token has not already been scored.
                 if (
-                    token_is_new
+                    needs_safety_analysis
                     and safety_analyzed
                     < MAX_SAFETY_ANALYSES_PER_CYCLE
                 ):
@@ -140,46 +140,28 @@ async def run_scan_cycle():
 
                         safety_analyzed += 1
 
-                        risk_score = safety[
-                            "rug_risk_score"
-                        ]
-
-                        risk_level = safety[
-                            "rug_risk_level"
-                        ]
+                        risk_score = safety["rug_risk_score"]
+                        risk_level = safety["rug_risk_level"]
 
                         token_record = db.scalar(
                             select(Token).where(
-                                Token.address
-                                == token_address
+                                Token.address == token_address
                             )
                         )
 
                         if token_record:
-                            token_record.rug_score = (
-                                risk_score
-                            )
+                            token_record.rug_score = risk_score
 
                             liquidity = (
-                                best_pair.get(
-                                    "liquidity"
-                                )
+                                best_pair.get("liquidity")
                                 or {}
                             )
 
                             try:
-                                token_record.liquidity = (
-                                    float(
-                                        liquidity.get(
-                                            "usd"
-                                        )
-                                        or 0
-                                    )
+                                token_record.liquidity = float(
+                                    liquidity.get("usd") or 0
                                 )
-                            except (
-                                TypeError,
-                                ValueError,
-                            ):
+                            except (TypeError, ValueError):
                                 pass
 
                             db.commit()
@@ -189,8 +171,7 @@ async def run_scan_cycle():
 
                         print(
                             (
-                                "SAFETY:"
-                                f" {token_address}"
+                                f"SAFETY: {token_address}"
                                 f" | risk={risk_score}"
                                 f" | level={risk_level}"
                                 f" | market="
@@ -209,9 +190,8 @@ async def run_scan_cycle():
 
                         print(
                             (
-                                "Safety analysis error "
-                                f"{token_address}: "
-                                f"{error}"
+                                f"Safety analysis error "
+                                f"{token_address}: {error}"
                             ),
                             flush=True,
                         )
@@ -236,7 +216,7 @@ async def run_scan_cycle():
             "SCAN COMPLETE | "
             f"tokens={tokens_checked} | "
             f"new_pairs={new_pairs} | "
-            f"existing_pairs={existing_pairs} | "
+            f"refreshed_pairs={refreshed_pairs} | "
             f"safety_analyzed={safety_analyzed} | "
             f"low_risk={low_risk} | "
             f"errors={errors}"
@@ -261,9 +241,7 @@ async def scanner_loop():
             flush=True,
         )
 
-        await asyncio.sleep(
-            SCAN_INTERVAL_SECONDS
-        )
+        await asyncio.sleep(SCAN_INTERVAL_SECONDS)
 
 
 if __name__ == "__main__":

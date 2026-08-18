@@ -11,9 +11,14 @@ TOKEN_PAIRS_URL = (
 
 
 async def discover_solana_tokens() -> list[dict]:
+    """
+    Discover recent Solana token profiles from DexScreener.
+    """
+
     async with httpx.AsyncClient(timeout=20.0) as client:
         response = await client.get(LATEST_PROFILES_URL)
         response.raise_for_status()
+
         profiles = response.json()
 
     discovered = []
@@ -25,7 +30,10 @@ async def discover_solana_tokens() -> list[dict]:
 
         token_address = profile.get("tokenAddress")
 
-        if not token_address or token_address in seen:
+        if not token_address:
+            continue
+
+        if token_address in seen:
             continue
 
         seen.add(token_address)
@@ -42,7 +50,17 @@ async def discover_solana_tokens() -> list[dict]:
     return discovered
 
 
-async def fetch_token_pairs(token_address: str) -> list[dict]:
+async def fetch_token_pairs(
+    token_address: str,
+) -> list[dict]:
+    """
+    Fetch Solana pools for a discovered token.
+
+    Only keep pools where the discovered token is the
+    base token. Our current database/scoring model treats
+    baseToken as the candidate being analyzed.
+    """
+
     url = TOKEN_PAIRS_URL.format(
         token_address=token_address
     )
@@ -50,10 +68,20 @@ async def fetch_token_pairs(token_address: str) -> list[dict]:
     async with httpx.AsyncClient(timeout=20.0) as client:
         response = await client.get(url)
         response.raise_for_status()
+
         pairs = response.json()
 
-    return [
-        pair
-        for pair in pairs
-        if pair.get("chainId") == "solana"
-    ]
+    valid_pairs = []
+
+    for pair in pairs:
+        if pair.get("chainId") != "solana":
+            continue
+
+        base_token = pair.get("baseToken") or {}
+
+        if base_token.get("address") != token_address:
+            continue
+
+        valid_pairs.append(pair)
+
+    return valid_pairs
