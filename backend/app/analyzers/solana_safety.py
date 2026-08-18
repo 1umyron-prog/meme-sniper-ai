@@ -236,4 +236,67 @@ async def analyze_token_authorities(
         "authority_risk_level": risk_level,
         "flags": flags,
         "positives": positives,
-    }
+    }    
+
+
+async def get_largest_account_owners(
+    token_address: str,
+) -> list[dict]:
+    """
+    Resolve the largest SPL token accounts to their owner addresses.
+    """
+
+    largest_result = await helius_rpc(
+        "getTokenLargestAccounts",
+        [token_address],
+    )
+
+    largest_accounts = largest_result.get("value") or []
+
+    if not largest_accounts:
+        return []
+
+    account_addresses = [
+        account["address"]
+        for account in largest_accounts
+        if account.get("address")
+    ]
+
+    account_result = await helius_rpc(
+        "getMultipleAccounts",
+        [
+            account_addresses,
+            {
+                "encoding": "jsonParsed",
+            },
+        ],
+    )
+
+    account_infos = account_result.get("value") or []
+
+    resolved = []
+
+    for token_account, account_info in zip(
+        largest_accounts,
+        account_infos,
+    ):
+        owner = None
+
+        if account_info:
+            data = account_info.get("data") or {}
+            parsed = data.get("parsed") or {}
+            info = parsed.get("info") or {}
+
+            owner = info.get("owner")
+
+        resolved.append(
+            {
+                "token_account":
+                    token_account.get("address"),
+                "owner": owner,
+                "amount":
+                    token_account.get("uiAmountString"),
+            }
+        )
+
+    return resolved    

@@ -1,6 +1,10 @@
 from backend.app.analyzers.rug_analyzer import analyze_pair
+
+from backend.app.analyzers.adjusted_holder_analyzer import (
+    analyze_adjusted_holder_concentration,
+)
+
 from backend.app.analyzers.solana_safety import (
-    analyze_holder_concentration,
     analyze_token_authorities,
 )
 
@@ -9,18 +13,16 @@ async def analyze_token_safety(
     token_address: str,
     pair_data: dict,
 ) -> dict:
-    """
-    Combine market, holder, and token-authority signals.
 
-    Higher rug_risk_score = higher apparent risk.
-    """
-
+    # 1. Analyze market behavior
     market = analyze_pair(pair_data)
 
-    holders = await analyze_holder_concentration(
+    # 2. Analyze holders, excluding known protocol accounts
+    holders = await analyze_adjusted_holder_concentration(
         token_address
     )
 
+    # 3. Analyze mint/freeze authorities
     authorities = await analyze_token_authorities(
         token_address
     )
@@ -29,8 +31,7 @@ async def analyze_token_safety(
     holder_score = holders["holder_risk_score"]
     authority_score = authorities["authority_risk_score"]
 
-    # Weighted risk score.
-    # Holder and authority data matter more than market structure.
+    # Combined risk score
     combined_score = round(
         (market_score * 0.25)
         + (holder_score * 0.40)
@@ -42,6 +43,7 @@ async def analyze_token_safety(
         min(100, combined_score),
     )
 
+    # Combine flags
     red_flags = []
     green_flags = []
 
@@ -53,24 +55,26 @@ async def analyze_token_safety(
     green_flags.extend(holders["positives"])
     green_flags.extend(authorities["positives"])
 
+    # Risk level
     if combined_score <= 20:
         risk_level = "LOW"
+
     elif combined_score <= 45:
         risk_level = "MODERATE"
+
     elif combined_score <= 70:
         risk_level = "HIGH"
+
     else:
         risk_level = "CRITICAL"
 
-    # Until large token accounts are resolved to their owners,
-    # holder concentration has uncertainty.
+    # Confidence level
     confidence = "MEDIUM"
 
-    if authority_score > 0:
-        confidence = "HIGH"
-
+    # Return final safety report
     return {
         "token_address": token_address,
+
         "rug_risk_score": combined_score,
         "rug_risk_level": risk_level,
         "confidence": confidence,
@@ -82,21 +86,36 @@ async def analyze_token_safety(
         },
 
         "holder_metrics": {
-            "largest_account_percent":
-                holders["largest_account_percent"],
-            "top_5_accounts_percent":
-                holders["top_5_accounts_percent"],
-            "top_10_accounts_percent":
-                holders["top_10_accounts_percent"],
+            "largest_non_protocol_percent":
+                holders["adjusted_metrics"][
+                    "largest_non_protocol_percent"
+                ],
+
+            "top_5_non_protocol_percent":
+                holders["adjusted_metrics"][
+                    "top_5_non_protocol_percent"
+                ],
+
+            "top_10_non_protocol_percent":
+                holders["adjusted_metrics"][
+                    "top_10_non_protocol_percent"
+                ],
         },
+
+        "excluded_protocol_accounts":
+            holders["excluded_protocol_accounts"],
 
         "authority_metrics": {
             "mint_authority":
                 authorities["mint_authority"],
+
             "freeze_authority":
                 authorities["freeze_authority"],
         },
 
-        "red_flags": list(dict.fromkeys(red_flags)),
-        "green_flags": list(dict.fromkeys(green_flags)),
+        "red_flags":
+            list(dict.fromkeys(red_flags)),
+
+        "green_flags":
+            list(dict.fromkeys(green_flags)),
     }
