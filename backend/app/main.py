@@ -2,8 +2,9 @@ from fastapi import Depends, FastAPI
 from sqlalchemy import select, text
 from sqlalchemy.orm import Session
 
-from backend.app.analyzers.rug_analyzer import analyze_pair
 from backend.app.analyzers.candidate_scorer import score_candidates
+from backend.app.analyzers.momentum_analyzer import analyze_momentum
+from backend.app.analyzers.rug_analyzer import analyze_pair
 from backend.app.db.database import engine, get_db
 from backend.app.db.init_db import init_db
 from backend.app.models.pair import Pair
@@ -15,7 +16,7 @@ from backend.app.services.token_service import save_pair
 app = FastAPI(
     title="MemeSniper AI",
     description="AI-powered meme coin risk and momentum scanner",
-    version="0.2.0",
+    version="0.3.0",
 )
 
 
@@ -29,7 +30,7 @@ def root():
     return {
         "name": "MemeSniper AI",
         "status": "online",
-        "version": "0.2.0",
+        "version": "0.3.0",
     }
 
 
@@ -121,20 +122,25 @@ def candidates(
 def watchlist(
     max_risk: float = 25,
     min_liquidity: float = 0,
+    min_momentum: int = 0,
     limit: int = 25,
     db: Session = Depends(get_db),
 ):
     """
-    Return automatically analyzed tokens whose stored rug score
-    is at or below the requested maximum risk threshold.
+    Rank automatically safety-screened tokens using:
+
+    - Safety score
+    - Momentum score
+    - Opportunity score
+
+    Higher opportunity score means stronger current signals.
+    It is not a prediction or guarantee of future price gains.
     """
 
     tokens = db.scalars(
         select(Token)
         .where(Token.rug_score.is_not(None))
         .where(Token.rug_score <= max_risk)
-        .order_by(Token.rug_score.asc())
-        .limit(limit * 3)
     ).all()
 
     results = []
@@ -148,6 +154,7 @@ def watchlist(
         if not pairs:
             continue
 
+        # Prefer the pool with the highest reported liquidity.
         best_pair = max(
             pairs,
             key=lambda pair: pair.liquidity_usd or 0,
@@ -160,6 +167,7 @@ def watchlist(
 
         buys = best_pair.buys_24h or 0
         sells = best_pair.sells_24h or 0
+
         total_trades = buys + sells
 
         buy_ratio = (
@@ -168,35 +176,131 @@ def watchlist(
             else None
         )
 
+        pair_data = {
+            "liquidity": {
+                "usd": best_pair.liquidity_usd,
+            },
+            "volume": {
+                "h24": best_pair.volume_24h,
+            },
+            "txns": {
+                "h24": {
+                    "buys": buys,
+                    "sells": sells,
+                }
+            },
+            "priceChange": {
+                "m5": best_pair.price_change_5m,
+                "h1": best_pair.price_change_1h,
+                "h24": best_pair.price_change_24h,
+            },
+        }
+
+        momentum = analyze_momentum(pair_data)
+
+        if momentum.score < min_momentum:
+            continue
+
+        rug_risk_score = float(token.rug_score)
+
+        # Convert risk into a positive safety score.
+        safety_score = round(
+            100 - rug_risk_score,
+            2,
+        )
+
+        # Initial opportunity ranking.
+        #
+        # Safety matters slightly more than momentum because
+        # avoiding obvious high-risk tokens is our first priority.
+        opportunity_score = round(
+            (safety_score * 0.55)
+            + (momentum.score * 0.45),
+            2,
+        )
+
+        if opportunity_score >= 80:
+            opportunity_level = "HIGH"
+
+        elif opportunity_score >= 65:
+            opportunity_level = "PROMISING"
+
+        elif opportunity_score >= 50:
+            opportunity_level = "WATCH"
+
+        else:
+            opportunity_level = "WEAK"
+
         results.append({
             "symbol": token.symbol,
             "name": token.name,
             "token_address": token.address,
-            "rug_risk_score": token.rug_score,
+
+            "rug_risk_score": rug_risk_score,
+            "safety_score": safety_score,
+
+            "momentum_score": momentum.score,
+            "momentum_level": momentum.level,
+
+            "opportunity_score": opportunity_score,
+            "opportunity_level": opportunity_level,
+
             "liquidity_usd": best_pair.liquidity_usd,
             "volume_24h": best_pair.volume_24h,
+
             "buys_24h": best_pair.buys_24h,
             "sells_24h": best_pair.sells_24h,
             "buy_ratio_percent": buy_ratio,
-            "price_change_5m": best_pair.price_change_5m,
-            "price_change_1h": best_pair.price_change_1h,
-            "price_change_24h": best_pair.price_change_24h,
+
+            "price_change_5m":
+                best_pair.price_change_5m,
+
+            "price_change_1h":
+                best_pair.price_change_1h,
+
+            "price_change_24h":
+                best_pair.price_change_24h,
+
             "dex": best_pair.dex_id,
             "pair_address": best_pair.pair_address,
-            "pair_created_at": best_pair.pair_created_at,
-            "discovered_at": best_pair.discovered_at,
+
+            "pair_created_at":
+                best_pair.pair_created_at,
+
+            "discovered_at":
+                best_pair.discovered_at,
+
+            "momentum_signals":
+                momentum.signals,
+
+            "momentum_warnings":
+                momentum.warnings,
         })
 
-        if len(results) >= limit:
-            break
+    # Highest opportunity score first.
+    results.sort(
+        key=lambda item: item["opportunity_score"],
+        reverse=True,
+    )
+
+    results = results[:limit]
 
     return {
         "status": "success",
+
         "filters": {
             "max_risk": max_risk,
             "min_liquidity": min_liquidity,
+            "min_momentum": min_momentum,
             "limit": limit,
         },
+
         "count": len(results),
+
+        "scoring": {
+            "safety_weight": 0.55,
+            "momentum_weight": 0.45,
+        },
+
         "watchlist": results,
     }
