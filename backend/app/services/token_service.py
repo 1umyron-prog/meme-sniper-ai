@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timezone
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -7,30 +7,74 @@ from backend.app.models.pair import Pair
 from backend.app.models.token import Token
 
 
-def save_pair(db: Session, pair_data: dict) -> Pair:
-    pair_address = pair_data.get("pairAddress")
+def save_pair(
+    db: Session,
+    pair_data: dict,
+) -> Pair:
+    pair_address = pair_data.get(
+        "pairAddress"
+    )
 
     if not pair_address:
-        raise ValueError("Pair is missing pairAddress")
+        raise ValueError(
+            "Pair is missing pairAddress"
+        )
 
-    base_token = pair_data.get("baseToken") or {}
-    quote_token = pair_data.get("quoteToken") or {}
+    base_token = (
+        pair_data.get("baseToken")
+        or {}
+    )
 
-    token_address = base_token.get("address")
+    quote_token = (
+        pair_data.get("quoteToken")
+        or {}
+    )
+
+    token_address = base_token.get(
+        "address"
+    )
 
     if not token_address:
-        raise ValueError("Pair is missing token address")
+        raise ValueError(
+            "Pair is missing token address"
+        )
 
-    liquidity = pair_data.get("liquidity") or {}
-    volume = pair_data.get("volume") or {}
-    txns = pair_data.get("txns") or {}
-    price_change = pair_data.get("priceChange") or {}
+    now = datetime.utcnow()
 
-    h24 = txns.get("h24") or {}
+    liquidity = (
+        pair_data.get("liquidity")
+        or {}
+    )
+
+    volume = (
+        pair_data.get("volume")
+        or {}
+    )
+
+    txns = (
+        pair_data.get("txns")
+        or {}
+    )
+
+    price_change = (
+        pair_data.get("priceChange")
+        or {}
+    )
+
+    h24 = (
+        txns.get("h24")
+        or {}
+    )
+
+    # ==========================================
+    # TOKEN
+    # ==========================================
 
     token = db.scalar(
-        select(Token).where(
-            Token.address == token_address
+        select(Token)
+        .where(
+            Token.address
+            == token_address
         )
     )
 
@@ -39,17 +83,37 @@ def save_pair(db: Session, pair_data: dict) -> Pair:
             address=token_address,
             name=base_token.get("name"),
             symbol=base_token.get("symbol"),
-            chain=pair_data.get("chainId", "solana"),
-            created_at=datetime.utcnow(),
-            last_scan=datetime.utcnow(),
+            chain=pair_data.get(
+                "chainId",
+                "solana",
+            ),
+            price=_float(
+                pair_data.get("priceUsd")
+            ),
+            market_cap=_float(
+                pair_data.get("marketCap")
+                or pair_data.get("fdv")
+            ),
+            liquidity=_float(
+                liquidity.get("usd")
+            ),
+            created_at=now,
+            last_scan=now,
         )
 
         db.add(token)
         db.flush()
 
     else:
-        token.name = base_token.get("name") or token.name
-        token.symbol = base_token.get("symbol") or token.symbol
+        token.name = (
+            base_token.get("name")
+            or token.name
+        )
+
+        token.symbol = (
+            base_token.get("symbol")
+            or token.symbol
+        )
 
         token.price = _float(
             pair_data.get("priceUsd")
@@ -64,11 +128,17 @@ def save_pair(db: Session, pair_data: dict) -> Pair:
             liquidity.get("usd")
         )
 
-        token.last_scan = datetime.utcnow()
+        token.last_scan = now
+
+    # ==========================================
+    # EXISTING PAIR
+    # ==========================================
 
     existing = db.scalar(
-        select(Pair).where(
-            Pair.pair_address == pair_address
+        select(Pair)
+        .where(
+            Pair.pair_address
+            == pair_address
         )
     )
 
@@ -119,23 +189,39 @@ def save_pair(db: Session, pair_data: dict) -> Pair:
             price_change.get("h24")
         )
 
-        pair_created_at = _datetime_from_ms(
-            pair_data.get("pairCreatedAt")
+        pair_created_at = (
+            _datetime_from_ms(
+                pair_data.get(
+                    "pairCreatedAt"
+                )
+            )
         )
 
         if pair_created_at is not None:
-            existing.pair_created_at = pair_created_at
+            existing.pair_created_at = (
+                pair_created_at
+            )
+
+        # Critical:
+        # only a successful live response reaches here.
+        existing.last_refreshed_at = now
 
         db.commit()
         db.refresh(existing)
 
         return existing
 
+    # ==========================================
+    # NEW PAIR
+    # ==========================================
+
     pair = Pair(
         pair_address=pair_address,
         token_address=token_address,
         dex_id=pair_data.get("dexId"),
-        quote_symbol=quote_token.get("symbol"),
+        quote_symbol=quote_token.get(
+            "symbol"
+        ),
         price_usd=_float(
             pair_data.get("priceUsd")
         ),
@@ -164,8 +250,11 @@ def save_pair(db: Session, pair_data: dict) -> Pair:
             price_change.get("h24")
         ),
         pair_created_at=_datetime_from_ms(
-            pair_data.get("pairCreatedAt")
+            pair_data.get(
+                "pairCreatedAt"
+            )
         ),
+        last_refreshed_at=now,
     )
 
     db.add(pair)
@@ -181,6 +270,7 @@ def _float(value):
 
     try:
         return float(value)
+
     except (TypeError, ValueError):
         return None
 
@@ -191,6 +281,7 @@ def _int(value):
 
     try:
         return int(value)
+
     except (TypeError, ValueError):
         return None
 
@@ -201,7 +292,15 @@ def _datetime_from_ms(value):
 
     try:
         return datetime.fromtimestamp(
-            float(value) / 1000
+            float(value) / 1000,
+            tz=timezone.utc,
+        ).replace(
+            tzinfo=None
         )
-    except (TypeError, ValueError, OSError):
+
+    except (
+        TypeError,
+        ValueError,
+        OSError,
+    ):
         return None

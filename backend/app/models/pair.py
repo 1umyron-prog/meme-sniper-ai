@@ -16,23 +16,23 @@ class Pair(Base):
     )
 
     pair_address: Mapped[str] = mapped_column(
-        String(64),
+        String(128),
         unique=True,
         index=True,
     )
 
     token_address: Mapped[str] = mapped_column(
-        String(64),
+        String(128),
         index=True,
     )
 
     dex_id: Mapped[str | None] = mapped_column(
-        String(50),
+        String(64),
         nullable=True,
     )
 
     quote_symbol: Mapped[str | None] = mapped_column(
-        String(20),
+        String(64),
         nullable=True,
     )
 
@@ -89,4 +89,12 @@ class Pair(Base):
     discovered_at: Mapped[datetime] = mapped_column(
         DateTime,
         default=datetime.utcnow,
+    )
+
+    # Last time this specific pair was successfully
+    # returned by a live market-data request.
+    last_refreshed_at: Mapped[datetime | None] = mapped_column(
+        DateTime,
+        nullable=True,
+        index=True,
     )
